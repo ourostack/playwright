@@ -58,7 +58,7 @@ export const test = base.extend<TestFixtures>({
     // https://chromium.googlesource.com/chromium/src/+/290ed8046692651ce76088914750cb659b65fb17%5E%21/chrome/browser/extensions/extension_service.cc?pli=1#
     test.skip('chromium' !== mcpBrowser, '--load-extension is not supported for official builds of Chromium');
 
-    let browserContext: BrowserContext | undefined;
+    let browser: BackgroundBrowser | undefined;
     const userDataDir = testInfo.outputPath('extension-user-data-dir');
     // --load-extension does not populate Default/Extensions/<id>; create the folder
     // so the relay's extension-installed check recognizes the test profile.
@@ -66,27 +66,21 @@ export const test = base.extend<TestFixtures>({
     await use({
       userDataDir,
       launch: async (mode?: 'disable-extension') => {
-        browserContext = await chromium.launchPersistentContext(userDataDir, {
-          channel: mcpBrowser,
-          // Opening the browser singleton only works in headed.
-          headless: false,
-          // Automation disables singleton browser process behavior, which is necessary for the extension.
-          ignoreDefaultArgs: ['--enable-automation'],
-          args: mode === 'disable-extension' ? [] : [
-            `--disable-extensions-except=${pathToExtension}`,
-            `--load-extension=${pathToExtension}`,
-          ],
-        });
+        browser = await launchInBackground(userDataDir, mode === 'disable-extension' ? [] : [
+          `--disable-extensions-except=${pathToExtension}`,
+          `--load-extension=${pathToExtension}`,
+        ]);
+        const browserContext = browser.context;
 
         // MV3 service workers start lazily; wait for the extension's
         // background to be ready so tests can reach `chrome.*` via it.
-        if (!browserContext.serviceWorkers().length)
+        if (mode !== 'disable-extension' && !browserContext.serviceWorkers().length)
           await browserContext.waitForEvent('serviceworker');
 
         return browserContext;
       }
     });
-    await browserContext?.close();
+    await browser?.close();
 
     // Free up disk space.
     await fs.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
@@ -186,6 +180,52 @@ async function runCli(
   });
 }
 
+type BackgroundBrowser = { context: BrowserContext, close: () => Promise<void> };
+
+// Starts headed Chromium without taking focus on the machine running the tests:
+// no startup window (whose first show activates the browser), then one window
+// opened in the background over CDP. The browser runs as a plain process rather
+// than under Playwright's launcher, so the relay can reach it through the
+// browser singleton, as it would reach the user's own browser.
+async function launchInBackground(userDataDir: string, extraArgs: string[]): Promise<BackgroundBrowser> {
+  const portFile = path.join(userDataDir, 'DevToolsActivePort');
+  await fs.rm(portFile, { force: true });
+  const browserProcess = spawn(chromium.executablePath(), [
+    `--user-data-dir=${userDataDir}`,
+    '--remote-debugging-port=0',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--use-mock-keychain',
+    '--password-store=basic',
+    '--no-startup-window',
+    ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
+    ...extraArgs,
+  ], { stdio: 'ignore' });
+  const exited = new Promise<void>(resolve => browserProcess.once('exit', () => resolve()));
+  let port: string | undefined;
+  for (let i = 0; i < 300 && !port; i++) {
+    port = await fs.readFile(portFile, 'utf8').then(text => text.split('\n')[0], () => undefined);
+    if (!port)
+      await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  if (!port) {
+    browserProcess.kill();
+    throw new Error('Browser did not start');
+  }
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  const cdp = await browser.newBrowserCDPSession();
+  await cdp.send('Target.createTarget', { url: 'about:blank', newWindow: true, background: true });
+  const context = browser.contexts()[0];
+  return {
+    context,
+    close: async () => {
+      await browser.close().catch(() => {});
+      browserProcess.kill();
+      await exited;
+    },
+  };
+}
+
 export async function startWithExtensionFlag(browserWithExtension: BrowserWithExtension, startClient: StartClient, env?: Record<string, string>): Promise<Client> {
   const { client } = await startClient({
     args: [`--extension`],
@@ -198,8 +238,12 @@ export async function startWithExtensionFlag(browserWithExtension: BrowserWithEx
 }
 
 export async function readExtensionToken(browserContext: BrowserContext): Promise<string> {
-  const page = await browserContext.newPage();
-  await page.goto(`chrome-extension://${extensionId}/status.html`);
+  // Open the status page in a background tab, like any other page the tests do not look at.
+  const cdp = await browserContext.browser()!.newBrowserCDPSession();
+  const pagePromise = browserContext.waitForEvent('page', page => page.url().includes('/status.html'));
+  await cdp.send('Target.createTarget', { url: `chrome-extension://${extensionId}/status.html`, background: true });
+  const page = await pagePromise;
+  await cdp.detach();
   const token = await page.locator('.auth-token-code').textContent();
   await page.close();
   const [, value] = token?.split('=') || [];
