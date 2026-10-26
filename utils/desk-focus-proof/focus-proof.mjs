@@ -69,10 +69,19 @@ let personTab, personWindow;
 for (let i = 0; i < 1200 && !personTab; i++) {
   await lib.sleep(100);
   const state = [...feed.observer].reverse().find(o => o.kind === 'state');
-  const w = state?.windows.find(w => w.tabs.some(t => t.url?.endsWith('/person') && t.active));
+  const isPerson = t => t.url?.endsWith('/person') || t.title?.startsWith('Desk focus test — person tab');
+  const w = state?.windows.find(w => w.tabs.some(t => isPerson(t) && t.active));
   if (w) {
     personWindow = w.id;
-    personTab = w.tabs.find(t => t.url?.endsWith('/person')).id;
+    personTab = w.tabs.find(isPerson).id;
+  }
+  // The observer reports full state only on tab events, and its first report can
+  // come before the tab has a URL. Once the person page itself reports, the
+  // only window's active tab is the person tab.
+  const tick = [...feed.observer].reverse().find(o => o.kind === 'tick');
+  if (!personTab && i >= 50 && feed.person.length && tick?.windows.length === 1 && state?.windows.length === 1 && state.windows[0].tabs.length === 1) {
+    personWindow = tick.windows[0].id;
+    personTab = tick.windows[0].activeTab;
   }
 }
 function abort(message) {

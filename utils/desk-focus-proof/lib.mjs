@@ -218,7 +218,7 @@ export async function startPersonApp(dir) {
   if (isWin) {
     const child = spawn('notepad.exe', [], { detached: true, stdio: 'ignore' });
     await sleep(2000);
-    powershell('win-helpers.ps1', ['front', String(child.pid)]);
+    console.log('person app:', powershell('win-helpers.ps1', ['front', String(child.pid)]).trim());
     await sleep(500);
     return { pid: child.pid, name: 'notepad', stop: () => { try { process.kill(child.pid); } catch {} } };
   }
@@ -250,7 +250,7 @@ export async function startPersonApp(dir) {
 // in the browser itself. Only used on test machines (CI runners).
 export async function bringBrowserToFront(browser) {
   if (isWin)
-    powershell('win-helpers.ps1', ['front', String(browser.pid)]);
+    console.log('browser:', powershell('win-helpers.ps1', ['front', String(browser.pid)]).trim());
   else
     execFileSync('/usr/bin/open', ['-a', browser.app]);
   await sleep(1000);
