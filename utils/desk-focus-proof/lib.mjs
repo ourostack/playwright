@@ -291,7 +291,8 @@ export async function launchTestBrowser({ executable, userDataDir, extensions, s
   let pid;
   const app = appBundleOf(executable);
   if (isMac) {
-    execFileSync('/usr/bin/open', ['-g', '-n', '-a', app, '--args', ...args]);
+    execFileSync('/usr/bin/open', ['-g', '-n', '-a', app, '--args', ...args], { timeout: 30000 });
+    console.log(`${new Date().toISOString().slice(11, 23)} open returned`);
   } else {
     const child = spawn(executable, args, { detached: true, stdio: 'ignore' });
     child.unref();
@@ -300,8 +301,11 @@ export async function launchTestBrowser({ executable, userDataDir, extensions, s
   const portFile = path.join(userDataDir, 'DevToolsActivePort');
   for (let i = 0; i < 600 && !fs.existsSync(portFile); i++)
     await sleep(100);
+  if (!fs.existsSync(portFile))
+    throw new Error(`browser did not write ${portFile} within 60 s`);
   await sleep(200);
   const [port] = fs.readFileSync(portFile, 'utf8').split('\n');
+  console.log(`${new Date().toISOString().slice(11, 23)} devtools port ${port}`);
   pid ??= findBrowserPid(userDataDir);
   if (noStartupWindow) {
     // A window created through the DevTools protocol with background: true is
@@ -332,7 +336,7 @@ export function quitBrowser(pid) {
 // Minimal CDP client over the browser's DevTools port, used only for setup
 // (reading the extension token from a page opened in the background).
 export async function cdp(port) {
-  const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+  const version = await (await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(15000) })).json();
   const ws = new WebSocket(version.webSocketDebuggerUrl);
   await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
   let id = 0;
