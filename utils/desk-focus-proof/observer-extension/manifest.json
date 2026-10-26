@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Desk focus test observer",
+  "version": "1.0.0",
+  "description": "Test-only. Reports the active tab, window focus and tab groups of the Desk focus test browser to the local proof harness.",
+  "permissions": ["tabs", "tabGroups"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "sw.js" }
+}

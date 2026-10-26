@@ -1,0 +1,104 @@
+# Desk focus proof (ourostack fork only, not for upstream).
+# Proves on CI runners, never on a person's machine, that Playwright's MCP tool
+# and extension work in a visible browser without taking focus, before (upstream
+# main) and after (the no-focus branch), and that the headed extension tests no
+# longer bring the browser forward.
+name: desk focus proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - user/arimendelow/no-focus-proof
+
+concurrency:
+  group: desk-focus-proof-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_COLOR: 1
+  UPSTREAM_SHA: b8336b3b7207be8af5439bf5de53252edde158cf
+
+jobs:
+  proof:
+    name: ${{ matrix.os }} ${{ matrix.browser }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        browser: [chromium, msedge]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: after
+    - uses: actions/checkout@v4
+      with:
+        repository: microsoft/playwright
+        ref: ${{ env.UPSTREAM_SHA }}
+        path: before
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - name: Build upstream main and the branch
+      run: |
+        (cd before && npm ci && npm run build)
+        (cd after && npm ci && npm run build)
+    - name: Install Chromium
+      run: cd after && npx playwright install chromium
+    - name: Pick the browser
+      run: |
+        mkdir -p out
+        case "${{ matrix.browser }}-${{ runner.os }}" in
+          chromium-*) exe=$(cd after && node -e "console.log(require('./packages/playwright-core').chromium.executablePath())") ;;
+          msedge-macOS) exe="/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" ;;
+          msedge-Windows) exe="C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" ;;
+        esac
+        echo "BROWSER_EXE=$exe" >> "$GITHUB_ENV"
+        echo "Browser: $exe"
+    - name: Screen capture permission (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        swiftc -O after/utils/desk-focus-proof/focus-sampler.swift -o out/focus-sampler
+        out/focus-sampler --preflight | tee out/screen-capture-permission.txt
+    - name: Focus proof
+      continue-on-error: true
+      run: |
+        for version in before after; do
+          for scenario in other-app browser-front; do
+            label="$version-${{ runner.os }}-${{ matrix.browser }}-$scenario"
+            node after/utils/desk-focus-proof/focus-proof.mjs --playwright "$version" --browser "$BROWSER_EXE" \
+              --label "$label" --scenario "$scenario" --rounds 2 --out "out/proof/$label" 2>&1 | tee "out/proof-$label.log" || true
+          done
+        done
+    - name: Headed extension tests, upstream main
+      if: matrix.browser == 'chromium'
+      continue-on-error: true
+      working-directory: before
+      run: |
+        npx playwright install chromium
+        node ../after/utils/desk-focus-proof/watch-command.mjs --out ../out/tests-before --label "extension-tests-before-${{ runner.os }}" -- \
+          npx playwright test --config=tests/extension/playwright.config.ts --workers=1 tests/extension/tab-management.spec.ts
+    - name: Headed extension tests, branch
+      if: matrix.browser == 'chromium'
+      continue-on-error: true
+      working-directory: after
+      run: |
+        node utils/desk-focus-proof/watch-command.mjs --out ../out/tests-after --label "extension-tests-after-${{ runner.os }}" -- \
+          npx playwright test --config=tests/extension/playwright.config.ts --workers=1
+    - name: Summary
+      if: always()
+      run: |
+        for f in out/proof/*/result.md out/tests-*/result.md; do [ -f "$f" ] && { cat "$f"; echo; } >> "$GITHUB_STEP_SUMMARY"; done; true
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: desk-focus-proof-${{ runner.os }}-${{ matrix.browser }}
+        path: out
