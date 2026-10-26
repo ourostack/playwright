@@ -21,6 +21,8 @@ import { ConnectedTabGroup, cleanupStalePlaywrightGroups, isNonDebuggableUrl, un
 type PageMessage = {
   type: 'connectionRequested';
   mcpRelayUrl: string;
+  // The client brought a token, so the page needs no user input.
+  withToken?: boolean;
 } | {
   type: 'getTabs';
 } | {
@@ -42,6 +44,8 @@ class PlaywrightExtension {
   private _connections = new Map<number, ConnectedTabGroup>();
   private _lastConnectionId = 0;
   private _pendingConnections = new PendingConnections();
+  // Connect pages seen by this service worker; they belong to clients, not to the user.
+  private _connectPageTabIds = new Set<number>();
   // Service worker restarts lose all connection state, so any existing
   // Playwright groups are stale. Connections wait on this before reconciling.
   private _cleanupPromise: Promise<void>;
@@ -49,6 +53,7 @@ class PlaywrightExtension {
   constructor() {
     chrome.runtime.onMessage.addListener(this._onMessage.bind(this));
     chrome.action.onClicked.addListener(this._onActionClicked.bind(this));
+    chrome.tabs.onCreated.addListener(this._onTabCreated.bind(this));
     this._cleanupPromise = cleanupStalePlaywrightGroups();
   }
 
@@ -57,6 +62,8 @@ class PlaywrightExtension {
     switch (message.type) {
       case 'connectionRequested': {
         const selectorTabId = sender.tab!.id!;
+        if (message.withToken)
+          void this._handBackWindow(sender.tab!);
         this._releaseConnectPage(selectorTabId).then(() => {
           this._pendingConnections.create(selectorTabId, message.mcpRelayUrl);
           sendResponse({ success: true });
@@ -74,7 +81,7 @@ class PlaywrightExtension {
         // sender.tab and UI-supplied tabs come from chrome.tabs.query / runtime
         // message sender, where `id` is always defined.
         const selectedTab = (message.tab ?? sender.tab!) as chrome.tabs.Tab & { id: number };
-        this._connectTab(sender.tab!.id!, selectedTab, message.clientName).then(
+        this._connectTab(sender.tab!.id!, selectedTab, message.clientName, !!message.tab).then(
             () => sendResponse({ success: true }),
             (error: any) => sendResponse({ success: false, error: error.message }));
         return true; // Return true to indicate that the response will be sent asynchronously
@@ -99,7 +106,7 @@ class PlaywrightExtension {
     }
   }
 
-  private async _connectTab(selectorTabId: number, tab: chrome.tabs.Tab & { id: number }, clientName: string | undefined): Promise<void> {
+  private async _connectTab(selectorTabId: number, tab: chrome.tabs.Tab & { id: number }, clientName: string | undefined, pickedByUser: boolean): Promise<void> {
     try {
       await this._cleanupPromise;
       this._releaseTab(selectorTabId);
@@ -116,10 +123,11 @@ class PlaywrightExtension {
       group.onclose = () => this._connections.delete(id);
       this._connections.set(id, group);
 
-      await Promise.all([
-        chrome.tabs.update(tab.id, { active: true }),
-        chrome.windows.update(tab.windowId, { focused: true }),
-      ]).catch(() => {});
+      // Show the tab only when the user picked it in the connect page. A client
+      // connecting with a token works in the background and never takes over
+      // the tab or window the user is looking at.
+      if (pickedByUser)
+        await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
 
       if (tab.id !== selectorTabId)
         await chrome.tabs.remove(selectorTabId).catch(() => {});
@@ -150,12 +158,57 @@ class PlaywrightExtension {
     return new Set([...this._connections.values()].flatMap(group => group.connectedTabIds()));
   }
 
+  // The relay opens the connect page through the browser's command line, which
+  // always opens it as the active tab. When the client brings a token, no user
+  // input is needed, so hand the window straight back to the tab the user was
+  // on; the connect page keeps working in the background. This runs as soon as
+  // the tab is created and again when the page reports in, in case the
+  // service worker was not running in time to see the tab being created.
+  private async _onTabCreated(tab: chrome.tabs.Tab): Promise<void> {
+    const url = tab.pendingUrl || tab.url;
+    if (tab.id === undefined || !isConnectPageUrl(url))
+      return;
+    this._connectPageTabIds.add(tab.id);
+    if (new URL(url!).searchParams.has('token'))
+      await this._handBackWindow(tab);
+  }
+
+  private async _handBackWindow(connectPage: chrome.tabs.Tab): Promise<void> {
+    try {
+      this._connectPageTabIds.add(connectPage.id!);
+      const current = await chrome.tabs.get(connectPage.id!);
+      if (!current.active)
+        return;
+      const previous = await this._mostRecentUserTab(current.windowId);
+      if (previous !== undefined)
+        await chrome.tabs.update(previous, { active: true });
+    } catch (error: any) {
+      debugLog('Failed to restore the active tab:', error.message);
+    }
+  }
+
+  private _isAgentTab(tabId: number): boolean {
+    return this._connectPageTabIds.has(tabId) || this._connectedTabIds().has(tabId);
+  }
+
+  // The tab the user was on before the connect page took over the window.
+  private async _mostRecentUserTab(windowId: number): Promise<number | undefined> {
+    const tabs = await chrome.tabs.query({ windowId });
+    const candidates = tabs.filter(t => t.id !== undefined && !this._isAgentTab(t.id) && !isConnectPageUrl(t.pendingUrl || t.url));
+    candidates.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
+    return candidates[0]?.id;
+  }
+
   private async _onActionClicked(): Promise<void> {
     await chrome.tabs.create({
       url: chrome.runtime.getURL('status.html'),
       active: true
     });
   }
+}
+
+function isConnectPageUrl(url: string | undefined): boolean {
+  return !!url && url.startsWith(chrome.runtime.getURL('connect.html'));
 }
 
 new PlaywrightExtension();
