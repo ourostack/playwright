@@ -2,18 +2,18 @@
 // when a connect page with a token is opened through the browser's command
 // line, both when its service worker is asleep and when it is awake?
 //
-// Usage: node connect-restore.mjs <playwright checkout> <browser executable> <out.json> [idle-seconds]
+// Usage: node connect-restore.mjs <playwright checkout> <browser executable> <out.json> [idle-seconds] [variant]
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import * as lib from '../lib.mjs';
 
-const [playwrightDir, executable, outFile, idleSeconds = '40'] = process.argv.slice(2);
+const [playwrightDir, executable, outFile, idleSeconds = '40', variant = ''] = process.argv.slice(2);
 const tmp = lib.makeTempDir('connect-restore');
 const userDataDir = path.join(tmp, 'profile');
 const pwExtension = path.join(tmp, 'playwright-extension');
-fs.cpSync(path.join(playwrightDir, 'packages/extension/dist'), pwExtension, { recursive: true });
+lib.preparePlaywrightExtension(playwrightDir, pwExtension, variant);
 const { port, feed, url, server } = await lib.startServer(process.env.DESK_DIAG ? 47123 : 0);
 const observer = lib.prepareObserverExtension(tmp, port);
 const browser = await lib.launchTestBrowser({ executable, userDataDir, extensions: [pwExtension, observer], startUrl: url('/person'), noStartupWindow: true });
@@ -49,5 +49,5 @@ if (diag.length)
   console.log(JSON.stringify(diag));
 lib.quitBrowser(browser.pid);
 server.close();
-fs.writeFileSync(outFile, JSON.stringify({ executable, playwrightDir, runs, diag }, null, 1));
+fs.writeFileSync(outFile, JSON.stringify({ executable, playwrightDir, variant, runs, diag }, null, 1));
 process.exit(0);

@@ -70,14 +70,28 @@ jobs:
         out/focus-sampler --preflight | tee out/screen-capture-permission.txt
     - name: Focus proof
       continue-on-error: true
-      timeout-minutes: 30
+      timeout-minutes: 45
       run: |
-        for version in before after; do
-          for scenario in other-app browser-front; do
-            label="$version-${{ runner.os }}-${{ matrix.browser }}-$scenario"
-            node after/utils/desk-focus-proof/focus-proof.mjs --playwright "$version" --browser "$BROWSER_EXE" \
-              --label "$label" --scenario "$scenario" --rounds 2 --out "out/proof/$label" 2>&1 | tee "out/proof-$label.log" || true
-          done
+        run() {
+          label="$1-${{ runner.os }}-${{ matrix.browser }}-$3"
+          node after/utils/desk-focus-proof/focus-proof.mjs --playwright "$2" --browser "$BROWSER_EXE" \
+            --label "$label" --scenario "$3" --rounds 2 --variant "$4" --out "out/proof/$label" 2>&1 | tee "out/proof-$label.log" || true
+        }
+        for scenario in other-app browser-front; do
+          run before before $scenario ""
+          run after after $scenario ""
+          # Without the extension's tabs.onCreated hand-back, to measure what it buys.
+          run after-no-oncreated after $scenario no-oncreated
+        done
+    - name: Connect page hand-back timing, with and without the tabs.onCreated listener
+      continue-on-error: true
+      timeout-minutes: 15
+      run: |
+        mkdir -p out/connect-restore
+        for variant in with-oncreated no-oncreated; do
+          v=$variant; [ "$v" = with-oncreated ] && v=""
+          node after/utils/desk-focus-proof/experiments/connect-restore.mjs after "$BROWSER_EXE" \
+            "out/connect-restore/${{ runner.os }}-${{ matrix.browser }}-$variant.json" 40 "$v" 2>&1 | tee "out/connect-restore/${{ runner.os }}-${{ matrix.browser }}-$variant.log" || true
         done
     - name: Headed extension tests, upstream main
       if: matrix.browser == 'chromium'
@@ -104,3 +118,30 @@ jobs:
       with:
         name: desk-focus-proof-${{ runner.os }}-${{ matrix.browser }}
         path: out
+
+  # Each upstream pull request branch on its own, with upstream's own
+  # extension test setup (macOS, as upstream's extension workflow runs).
+  split-branch-tests:
+    name: extension tests ${{ matrix.branch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        branch:
+          - user/arimendelow/no-focus-1-background-tabs
+          - user/arimendelow/no-focus-2-no-activate
+          - user/arimendelow/no-focus-3-extension-connect
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      DEBUG: pw:mcp:error
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ matrix.branch }}
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - run: npm ci
+    - run: npm run build
+    - run: npx playwright install --with-deps chromium
+    - run: npm run test-extension

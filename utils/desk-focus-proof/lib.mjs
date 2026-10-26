@@ -55,6 +55,8 @@ function agentPage(name, n) {
 <label>Text field <input id="field" aria-label="Text field"></label>
 <button id="go" onclick="clicks++;document.getElementById('clicked').textContent='Clicked ' + clicks">Press me</button>
 <span id="clicked">Not clicked</span>
+<p><a id="newtab" href="/agent?name=${name}&n=${n + 10}" target="_blank">Open a new tab (link)</a>
+<button id="opener" onclick="window.open('/agent?name=${name}&n=${n + 20}')">Open a new tab (window.open)</button></p>
 <p>Rich editor:</p><div id="editor" contenteditable="true" aria-label="Rich editor"></div>
 <p id="focusinfo">focus events: none</p>
 <div id="stats"></div>
@@ -265,6 +267,20 @@ export async function bringBrowserToFront(browser) {
 }
 
 // ─── Test browser ──────────────────────────────────────────────────────────
+
+// Copies the Playwright extension. Variant 'no-oncreated' drops the
+// extension's tabs.onCreated hand-back listener, to measure what it buys.
+export function preparePlaywrightExtension(playwrightDir, target, variant) {
+  fs.cpSync(path.join(playwrightDir, 'packages/extension/dist'), target, { recursive: true });
+  if (variant === 'no-oncreated') {
+    const file = path.join(target, 'lib', 'background.mjs');
+    const source = fs.readFileSync(file, 'utf8');
+    const patched = source.replace(/chrome\.tabs\.onCreated\.addListener\(this\._onTabCreated\.bind\(this\)\)/, 'void 0');
+    if (patched === source)
+      throw new Error('variant no-oncreated: listener not found in background.mjs');
+    fs.writeFileSync(file, patched);
+  }
+}
 
 export function prepareObserverExtension(dir, port) {
   const target = path.join(dir, 'observer-extension');

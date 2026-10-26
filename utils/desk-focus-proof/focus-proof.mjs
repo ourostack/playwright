@@ -52,7 +52,7 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 23), ...a);
 const tmp = lib.makeTempDir(label);
 const userDataDir = path.join(tmp, 'profile');
 const pwExtension = path.join(tmp, 'playwright-extension');
-fs.cpSync(path.join(playwrightDir, 'packages/extension/dist'), pwExtension, { recursive: true });
+lib.preparePlaywrightExtension(playwrightDir, pwExtension, arg('variant', ''));
 const personApp = scenario === 'other-app' && process.env.DESK_FOCUS_PERSON_APP !== 'none' ? await lib.startPersonApp(tmp) : undefined;
 let gitHead = '';
 try { gitHead = execFileSync('git', ['-C', playwrightDir, 'log', '-1', '--format=%H %s'], { encoding: 'utf8' }).trim(); } catch {}
@@ -157,8 +157,8 @@ function textOf(result) {
   return (result?.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
 }
 
-async function call(agent, tool, args, check) {
-  const entry = { agent: agent.name, tool, args, start: Date.now() };
+async function call(agent, tool, args, check, phase = 'work') {
+  const entry = { agent: agent.name, tool, args, phase, start: Date.now() };
   try {
     const result = await agent.client.callTool({ name: tool, arguments: args }, undefined, { timeout: 180000 });
     entry.text = textOf(result).slice(0, 4000);
@@ -227,9 +227,16 @@ async function runAgent(agent, round) {
   await call(agent, 'browser_evaluate', { function: '() => window.deskState()' }, stateCheck({ page: 1, field: `hello from ${n}` }));
   await call(agent, 'browser_tabs', { action: 'select', index: 1 });
   await call(agent, 'browser_evaluate', { function: '() => window.deskState()' }, stateCheck({ page: 2, field: v => typeof v === 'string' && v.endsWith(`page two from ${n}`) }));
-  if (n === 'A') {
-    await call(agent, 'browser_start_recording', {});
-    await call(agent, 'browser_stop_recording', {});
+  if (round === 1) {
+    // A click in the agent's page that opens a tab: Chrome shows such tabs in front.
+    await call(agent, 'browser_tabs', { action: 'select', index: 0 });
+    await call(agent, 'browser_click', { element: 'Open a new tab (link)', target: '#newtab' }, undefined, 'popup');
+    await call(agent, 'browser_click', { element: 'Open a new tab (window.open)', target: '#opener' }, undefined, 'popup');
+    await lib.sleep(500);
+    await call(agent, 'browser_tabs', { action: 'list' }, t => t.includes(`agent ${n} page 11`) && t.includes(`agent ${n} page 21`) ? undefined : 'tab list misses the opened tabs', 'popup');
+    await call(agent, 'browser_tabs', { action: 'close', index: 3 }, undefined, 'popup');
+    await call(agent, 'browser_tabs', { action: 'close', index: 2 }, undefined, 'popup');
+    await call(agent, 'browser_tabs', { action: 'select', index: 1 });
   }
   await call(agent, 'browser_tabs', { action: 'list' }, t => t.includes(`agent ${n} page 2`) ? undefined : 'tab list misses page 2');
 }
@@ -264,6 +271,32 @@ for (const id of lib.browserWindowIds(browser.pid))
 shot('screen-3-after.png', lib.screenshotScreen);
 
 const groupsSeen = [...feed.observer].reverse().find(o => o.kind === 'state')?.groups ?? [];
+
+// After the measured run: recording is meant to show its tab, because the
+// person acts in it; and a popup window (window.open with window features)
+// opens a new browser window. Observed for information only.
+const extras = {};
+if (agents.length === 2) {
+  await lib.sleep(1500);
+  const t0 = Date.now();
+  await call(agents[0], 'browser_start_recording', {}, undefined, 'recording');
+  await lib.sleep(1500);
+  const state = [...feed.observer].reverse().find(o => o.kind === 'state' || o.kind === 'tick');
+  const active = state?.windows.find(w => w.id === personWindow)?.activeTab;
+  extras.recording = { from: t0, personTabActive: active === personTab };
+  await call(agents[0], 'browser_stop_recording', {}, undefined, 'recording');
+  await lib.sleep(1000);
+  const t1 = Date.now();
+  await call(agents[1], 'browser_evaluate', { function: `() => { window.open(location.origin + '/agent?name=B&n=30', '', 'popup,width=500,height=400'); }` }, undefined, 'popup-window');
+  await lib.sleep(2500);
+  extras.popupWindow = {
+    from: t1,
+    browserCameForward: sampler.lines.some(l => l.t >= t1 && ((l.kind === 'activate' && l.app?.pid === browser.pid) || (l.kind === 'sample' && scenario === 'other-app' && l.front?.pid === browser.pid))),
+    windowFocusEvents: feed.observer.filter(o => o.t >= t1 && o.kind === 'windowFocusChanged' && o.windowId !== -1).length,
+    personTabActive: ([...feed.observer].reverse().find(o => o.kind === 'state' || o.kind === 'tick')?.windows.find(w => w.id === personWindow)?.activeTab) === personTab,
+  };
+  log('extras', JSON.stringify(extras));
+}
 for (const agent of agents) {
   fs.writeFileSync(path.join(agent.agentDir, 'mcp-stderr.txt'), agent.stderr());
   await agent.client.close().catch(() => {});
@@ -302,7 +335,11 @@ const obs = feed.observer.filter(o => inWindow(o.t));
 // line. Report that phase separately from the agents' work.
 const firstNavigations = ['A', 'B'].map(n => actions.find(a => a.agent === n && a.tool === 'browser_navigate')).filter(Boolean);
 const tConnected = firstNavigations.length ? Math.max(...firstNavigations.map(a => a.end)) : tEnd;
-const inWork = t => t > tConnected && t <= tEnd + 1000;
+// Popup actions (a click that opens a tab) are reported on their own, with
+// half a second for the extension to hand the window back.
+const popupWindows = actions.filter(a => a.phase === 'popup').map(a => ({ from: a.start, to: a.end + 500 }));
+const inPopup = t => popupWindows.some(w => t >= w.from && t <= w.to);
+const inWork = t => t > tConnected && t <= tEnd + 1000 && !inPopup(t);
 const inConnect = t => t >= tStart && t <= tConnected;
 const tabActivations = obs.filter(o => o.kind === 'tabActivated' && o.windowId === personWindow && o.tabId !== personTab);
 const otherWindowActivations = obs.filter(o => o.kind === 'tabActivated' && o.windowId !== personWindow);
@@ -334,6 +371,7 @@ function hiddenSpans(filter) {
 }
 const connectSpans = hiddenSpans(inConnect);
 const workSpans = hiddenSpans(inWork);
+const popupSpans = hiddenSpans(inPopup);
 const count = (xs, f) => xs.filter(x => f(x.t)).length;
 
 const checks = [
@@ -347,7 +385,10 @@ const checks = [
   ...(scenario === 'browser-front' ? [{ name: "The person's page kept keyboard focus (document.hasFocus() and its text field focused in every report)", required: true, pass: personReports.length > 0 && personReports.every(p => p.hasFocus && p.activeElement === 'note'), detail: `${personReports.filter(p => !(p.hasFocus && p.activeElement === 'note')).length} of ${personReports.length} reports without focus` }] : []),
   { name: "The person's page never saw a visibility change or lost focus (its own events)", required: true, pass: personChangeEvents.length === 0, detail: `${personChangeEvents.length} visibilitychange or blur events; visibilityState stayed "${[...new Set(personReports.map(p => p.visibility))].join('", "')}" (hidden means macOS reports the test window as covered by other windows)` },
   { name: 'No agent tab or window opened in front', required: true, pass: tabsCreatedActive.length === 0 && otherWindowActivations.length === 0 && windowsEverOpen.size <= 1, detail: `${tabsCreatedActive.length} tabs created active (${tabsCreatedActive.map(t => (t.url || '').split('?')[0].replace(/^chrome-extension:\/\/[a-z]+\//, 'extension:')).join(', ')}), ${otherWindowActivations.length} activations in other windows, ${windowsEverOpen.size} windows seen` },
+  { name: "The person's tab stayed the active tab when an agent's click opened a tab (link with target=_blank, window.open)", required: true, pass: count(tabActivations, inPopup) === 0 && count(wrongPolls, inPopup) === 0, detail: `${count(tabActivations, inPopup)} other tabs activated; ${count(wrongPolls, inPopup)} of ${count(allPolls, inPopup)} polls saw another active tab; person's tab not active for ${popupSpans.map(s => s.ms + ' ms').join(', ') || '0 ms'}` },
   { name: 'Every agent action succeeded', required: true, pass: failedActions.length === 0 && actions.length > 0, detail: `${actions.length - failedActions.length} of ${actions.length} actions succeeded` },
+  ...(extras.recording ? [{ name: 'Recording shows the recorded tab, because the person acts in it (information only, after the run)', required: false, pass: !extras.recording.personTabActive, detail: extras.recording.personTabActive ? "the person's tab stayed active" : "the recorded tab became the active tab" }] : []),
+  ...(extras.popupWindow ? [{ name: 'A popup window (window.open with window features) stays behind (information only, after the run)', required: false, pass: !extras.popupWindow.browserCameForward && extras.popupWindow.personTabActive, detail: `browser came forward: ${extras.popupWindow.browserCameForward}; window focus events: ${extras.popupWindow.windowFocusEvents}; person's tab still active in its window: ${extras.popupWindow.personTabActive}` }] : []),
   { name: 'Browser never asked to focus one of its windows (information only: macOS refused the request)', required: false, pass: windowFocusEvents.length === 0, detail: `${windowFocusEvents.length} window focus events (Chrome's own; the frontmost-app checks show whether macOS honored them)` },
 ];
 const pass = checks.filter(c => c.required).every(c => c.pass);
@@ -359,7 +400,7 @@ const result = {
   failedActions, actions: actions.map(a => ({ agent: a.agent, tool: a.tool, args: a.args, ok: a.ok, ms: a.end - a.start, error: a.error })),
   evidence: {
     activationEvents: activations, spaceEvents, spaceChanges, frontSamples: frontSamples.slice(0, 50),
-    connectedAt: new Date(tConnected).toISOString(), connectPhaseMs: tConnected - tStart, connectSpans, workSpans,
+    connectedAt: new Date(tConnected).toISOString(), connectPhaseMs: tConnected - tStart, connectSpans, workSpans, popupSpans, extras,
     activeTabChanges, windowFocusEvents, tabsCreatedActive, personEvents,
     samplerSampleCount: samples.length, lsappinfoSampleCount: lsFront.length,
     samplerIntervalMsMedian: median(samples.slice(1).map((s, i) => s.t - samples[i].t)),
