@@ -282,6 +282,11 @@ function appBundleOf(executable) {
 // shown in front) and opens one window in the background over CDP. On macOS
 // it goes through `open -g -n`, so Launch Services does not activate it.
 export async function launchTestBrowser({ executable, userDataDir, extensions, startUrl, extraArgs = [], noStartupWindow = false }) {
+  // On Windows, Chrome for Testing leaves a window opened this way on an empty,
+  // never-loaded tab; there, Windows' foreground lock keeps an ordinary startup
+  // window behind the person's app instead.
+  if (isWin)
+    noStartupWindow = false;
   const args = [
     `--user-data-dir=${userDataDir}`,
     '--remote-debugging-port=0',
