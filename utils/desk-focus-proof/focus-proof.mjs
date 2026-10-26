@@ -95,7 +95,7 @@ function abort(message) {
   console.error('observer reports:', JSON.stringify(feed.observer.slice(-3)).slice(0, 2000));
   console.error('person reports:', feed.person.length);
   console.error('latest observer state:', JSON.stringify([...feed.observer].reverse().find(o => o.kind === 'state')));
-  fs.writeFileSync(path.join(outDir, 'raw-observer.jsonl'), feed.observer.map(l => JSON.stringify(l)).join('\n'));
+  fs.writeFileSync(path.join(outDir, 'raw-observer.jsonl'), feed.observer.map(l => JSON.stringify(l)).join('\n').replace(/([?&]token=)[^&"\s]+/g, '$1<redacted>'));
   fs.writeFileSync(path.join(outDir, 'raw-sampler.jsonl'), sampler.lines.map(l => JSON.stringify(l)).join('\n'));
   shot('screen-abort.png', lib.screenshotScreen);
   sampler.stop();
@@ -111,8 +111,22 @@ const token = await lib.readExtensionToken(browser.devtoolsPort).catch(e => abor
 if (!token)
   abort('could not read the Playwright extension token');
 await lib.sleep(1500);
-if (scenario === 'browser-front')
+const setupNotes = [];
+if (browser.launchedDirectly) {
+  setupNotes.push('The browser was started directly instead of through `open -g`, so it could come forward at start; the person\'s app was brought back to the front before measuring.');
+  if (scenario === 'other-app' && personApp?.app)
+    await lib.bringAppToFront(personApp.app);
+}
+if (scenario === 'browser-front') {
   await lib.bringBrowserToFront(browser);
+  // Measure only once the person's page has keyboard focus, as it would when a person is typing there.
+  let focused = false;
+  for (let i = 0; i < 50 && !(focused = !!feed.person.at(-1)?.hasFocus); i++)
+    await lib.sleep(100);
+  if (!focused)
+    setupNotes.push('The person\'s page did not have keyboard focus when measuring started; the keyboard-focus check below does not reflect Playwright.');
+  log('person page has focus at start:', focused);
+}
 const personAppPid = scenario === 'browser-front' ? browser.pid : personApp?.pid;
 const windowIds = lib.browserWindowIds(browser.pid);
 log('person tab', personTab, 'window', personWindow, 'cg windows', windowIds);
@@ -341,7 +355,7 @@ const pass = checks.filter(c => c.required).every(c => c.pass);
 const result = {
   label, scenario, platform: process.platform, personAppPid, pass, playwrightDir, playwrightHead: gitHead, browserExecutable: executable, browserPid: bpid,
   startedAt: new Date(tStart).toISOString(), durationMs: tEnd - tStart,
-  personTab, personWindow, groupsSeen, checks,
+  personTab, personWindow, groupsSeen, setupNotes, checks,
   failedActions, actions: actions.map(a => ({ agent: a.agent, tool: a.tool, args: a.args, ok: a.ok, ms: a.end - a.start, error: a.error })),
   evidence: {
     activationEvents: activations, spaceEvents, spaceChanges, frontSamples: frontSamples.slice(0, 50),
@@ -356,9 +370,11 @@ const result = {
 };
 function median(xs) { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : null; }
 
-fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify(result, null, 1));
+// The connect page URL carries the test profile's extension token; keep it out of the files.
+const redact = text => text.replace(/([?&]token=)[^&"\s]+/g, '$1<redacted>');
+fs.writeFileSync(path.join(outDir, 'result.json'), redact(JSON.stringify(result, null, 1)));
 fs.writeFileSync(path.join(outDir, 'raw-sampler.jsonl'), sampler.lines.map(l => JSON.stringify(l)).join('\n'));
-fs.writeFileSync(path.join(outDir, 'raw-observer.jsonl'), feed.observer.map(l => JSON.stringify(l)).join('\n'));
+fs.writeFileSync(path.join(outDir, 'raw-observer.jsonl'), redact(feed.observer.map(l => JSON.stringify(l)).join('\n')));
 
 const md = [
   `# Desk focus proof: ${label}`,
@@ -371,6 +387,7 @@ const md = [
   `- Run: ${result.startedAt}, ${(result.durationMs / 1000).toFixed(1)} s, ${rounds} rounds, two agents (A and B)`,
   `- Samples: ${samples.length} focus samples (median every ${result.evidence.samplerIntervalMsMedian} ms) and ${lsFront.length} \`lsappinfo front\` samples`,
   `- Tab groups seen: ${groupsSeen.map(g => `"${g.title}" (${g.color})`).join(', ') || 'none'}`,
+  ...setupNotes.map(n => `- Setup note: ${n}`),
   '',
   '| Check | Result | Detail |',
   '| --- | --- | --- |',

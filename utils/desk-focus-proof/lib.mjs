@@ -218,7 +218,9 @@ export async function startPersonApp(dir) {
   if (isWin) {
     const child = spawn('notepad.exe', [], { detached: true, stdio: 'ignore' });
     await sleep(2000);
-    console.log('person app:', powershell('win-helpers.ps1', ['front', String(child.pid)]).trim());
+    // A typing person keeps Windows' foreground lock active; the injected Alt
+    // press starts it the same way, so a newly started browser cannot take over.
+    console.log('person app:', powershell('win-helpers.ps1', ['front', String(child.pid), 'alt']).trim());
     await sleep(500);
     return { pid: child.pid, name: 'notepad', stop: () => { try { process.kill(child.pid); } catch {} } };
   }
@@ -243,11 +245,17 @@ export async function startPersonApp(dir) {
     pid = line ? +line.trim().split(/\s+/)[0] : undefined;
   }
   await sleep(1000);
-  return { pid, name: 'Desk focus test person', stop: () => { try { process.kill(pid); } catch {} } };
+  return { pid, app, name: 'Desk focus test person', stop: () => { try { process.kill(pid); } catch {} } };
 }
 
 // Brings the test browser to the front, for the run where the person works
 // in the browser itself. Only used on test machines (CI runners).
+export async function bringAppToFront(app) {
+  if (isMac)
+    execFileSync('/usr/bin/open', ['-a', app]);
+  await sleep(1000);
+}
+
 export async function bringBrowserToFront(browser) {
   if (isWin)
     console.log('browser:', powershell('win-helpers.ps1', ['front', String(browser.pid)]).trim());
@@ -290,15 +298,26 @@ export async function launchTestBrowser({ executable, userDataDir, extensions, s
   ];
   let pid;
   const app = appBundleOf(executable);
+  const portFile = path.join(userDataDir, 'DevToolsActivePort');
+  let launchedDirectly = false;
   if (isMac) {
-    execFileSync('/usr/bin/open', ['-g', '-n', '-a', app, '--args', ...args], { timeout: 30000 });
-    console.log(`${new Date().toISOString().slice(11, 23)} open returned`);
+    try {
+      execFileSync('/usr/bin/open', ['-g', '-n', '-a', app, '--args', ...args], { timeout: 20000 });
+    } catch (e) {
+      // Seen with branded Edge on GitHub's macOS runners: `open` never returns.
+      for (let i = 0; i < 50 && !fs.existsSync(portFile); i++)
+        await sleep(100);
+      if (!fs.existsSync(portFile)) {
+        console.log(`open -g did not start the browser (${e.code}); starting the executable directly, which can bring it forward`);
+        spawn(executable, args, { detached: true, stdio: 'ignore' }).unref();
+        launchedDirectly = true;
+      }
+    }
   } else {
     const child = spawn(executable, args, { detached: true, stdio: 'ignore' });
     child.unref();
     pid = child.pid;
   }
-  const portFile = path.join(userDataDir, 'DevToolsActivePort');
   for (let i = 0; i < 600 && !fs.existsSync(portFile); i++)
     await sleep(100);
   if (!fs.existsSync(portFile))
@@ -314,7 +333,7 @@ export async function launchTestBrowser({ executable, userDataDir, extensions, s
     await c.send('Target.createTarget', { url: startUrl, newWindow: true, background: true });
     c.close();
   }
-  return { pid, devtoolsPort: +port, app, args };
+  return { pid, devtoolsPort: +port, app, args, launchedDirectly };
 }
 
 export function findBrowserPid(userDataDir) {
