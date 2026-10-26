@@ -139,7 +139,8 @@ export class BrowserModel {
   }
 
   async createTarget(url: string | undefined): Promise<{ targetId: string | undefined }> {
-    const tab = await this._sendToExtension('chrome.tabs.create', [{ url }]);
+    // Agent tabs open in the background so the user's active tab keeps focus.
+    const tab = await this._sendToExtension('chrome.tabs.create', [{ url, active: false }]);
     if (tab?.id === undefined)
       throw new Error('Failed to create tab');
     this._knownTabs.set(tab.id, tab);
@@ -209,6 +210,15 @@ export class BrowserModel {
       'Target.getTargetInfo',
     ]);
     const targetInfo = result?.targetInfo;
+    // Agent tabs are usually hidden behind the tab the user is working in.
+    // Hidden tabs get no animation frames and drop key and mouse input, so
+    // emulate focus: the page then renders and takes input like the active tab
+    // without the browser activating it.
+    await this._sendToExtension('chrome.debugger.sendCommand', [
+      { tabId },
+      'Emulation.setFocusEmulationEnabled',
+      { enabled: true },
+    ]).catch(logUnhandledError);
     const sessionId = `pw-tab-${this._nextSessionId++}`;
     const tabSession: TabSession = { tabId, sessionId, targetInfo, childSessions: new Set() };
     this._tabSessions.set(tabId, tabSession);

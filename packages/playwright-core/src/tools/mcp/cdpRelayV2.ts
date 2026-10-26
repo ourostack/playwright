@@ -108,6 +108,12 @@ export class ExtensionProtocolV2 {
         return { result: await this._model.closeTarget(params?.targetId) };
       case 'Target.getTargetInfo':
         return { result: this._model.getTargetInfo(sessionId) };
+      // The browser belongs to the user: never activate a tab or raise a window
+      // on the client's behalf. Tabs keep working in the background through
+      // focus emulation (see BrowserModel).
+      case 'Page.bringToFront':
+      case 'Target.activateTarget':
+        return { result: {} };
     }
     return undefined;
   }
