@@ -182,48 +182,87 @@ async function runCli(
 
 type BackgroundBrowser = { context: BrowserContext, close: () => Promise<void> };
 
+// Playwright's own Chromium switches that matter for these tests. The browser is
+// not started by Playwright's launcher (see below), so they are not added for us.
+const chromiumTestSwitches = [
+  '--no-first-run',
+  '--no-default-browser-check',
+  '--use-mock-keychain',
+  '--password-store=basic',
+  '--disable-background-networking',
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+  '--disable-component-extensions-with-background-pages',
+  '--disable-component-update',
+  '--disable-default-apps',
+  '--disable-search-engine-choice-screen',
+  '--disable-sync',
+  '--disable-infobars',
+  '--no-service-autorun',
+];
+
 // Starts headed Chromium without taking focus on the machine running the tests:
 // no startup window (whose first show activates the browser), then one window
-// opened in the background over CDP. The browser runs as a plain process rather
-// than under Playwright's launcher, so the relay can reach it through the
-// browser singleton, as it would reach the user's own browser.
+// opened in the background over CDP. On macOS, the app is started through
+// LaunchServices in the background, because an app started as a plain child
+// process activates itself when it finishes launching. The browser is not
+// started by Playwright's launcher, so the relay reaches it through the browser
+// singleton, as it would reach the user's own browser.
 async function launchInBackground(userDataDir: string, extraArgs: string[]): Promise<BackgroundBrowser> {
   const portFile = path.join(userDataDir, 'DevToolsActivePort');
   await fs.rm(portFile, { force: true });
-  const browserProcess = spawn(chromium.executablePath(), [
+  const executable = chromium.executablePath();
+  const args = [
     `--user-data-dir=${userDataDir}`,
     '--remote-debugging-port=0',
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--use-mock-keychain',
-    '--password-store=basic',
     '--no-startup-window',
+    ...chromiumTestSwitches,
     ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
     ...extraArgs,
-  ], { stdio: 'ignore' });
-  const exited = new Promise<void>(resolve => browserProcess.once('exit', () => resolve()));
+  ];
+  const appBundle = process.platform === 'darwin' ? executable.match(/^(.*?\.app)\/Contents\/MacOS\//)?.[1] : undefined;
+  if (appBundle) {
+    // -g: do not bring the app forward; -n: a new instance even if one is running.
+    const opener = spawn('open', ['-g', '-n', '-a', appBundle, '--args', ...args], { stdio: 'ignore' });
+    await new Promise(resolve => opener.once('exit', resolve));
+  } else {
+    spawn(executable, args, { stdio: 'ignore' });
+  }
   let port: string | undefined;
   for (let i = 0; i < 300 && !port; i++) {
     port = await fs.readFile(portFile, 'utf8').then(text => text.split('\n')[0], () => undefined);
     if (!port)
       await new Promise(resolve => setTimeout(resolve, 100));
   }
-  if (!port) {
-    browserProcess.kill();
+  if (!port)
     throw new Error('Browser did not start');
-  }
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
   const cdp = await browser.newBrowserCDPSession();
+  const { processInfo } = await cdp.send('SystemInfo.getProcessInfo') as { processInfo: { type: string, id: number }[] };
+  const pid = processInfo.find(p => p.type === 'browser')?.id;
   await cdp.send('Target.createTarget', { url: 'about:blank', newWindow: true, background: true });
   const context = browser.contexts()[0];
   return {
     context,
     close: async () => {
+      await cdp.send('Browser.close').catch(() => {});
       await browser.close().catch(() => {});
-      browserProcess.kill();
-      await exited;
+      for (let i = 0; pid && i < 100 && isAlive(pid); i++)
+        await new Promise(resolve => setTimeout(resolve, 100));
+      if (pid && isAlive(pid))
+        process.kill(pid, 'SIGKILL');
     },
   };
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function startWithExtensionFlag(browserWithExtension: BrowserWithExtension, startClient: StartClient, env?: Record<string, string>): Promise<Client> {
