@@ -36,6 +36,17 @@ const clientInfo = (() => {
   }
 })();
 
+// Read before the page removes the token from its URL.
+const connectsWithToken = new URLSearchParams(window.location.search).has('token');
+
+async function showThisPage() {
+  const tab = await chrome.tabs.getCurrent();
+  if (!tab?.id)
+    return;
+  await chrome.tabs.update(tab.id, { active: true });
+  await chrome.windows.update(tab.windowId, { focused: true });
+}
+
 const ConnectApp: React.FC = () => {
   const [tabs, setTabs] = useState<chrome.tabs.Tab[]>([]);
   const [status, setStatus] = useState<Status | null>(null);
@@ -45,6 +56,13 @@ const ConnectApp: React.FC = () => {
     setShowTabList(false);
     setStatus({ type: 'error', message });
   }, []);
+
+  // A client with a token connects in the background (see background.ts).
+  // If that fails, show this page so the user sees why.
+  useEffect(() => {
+    if (status?.type === 'error' && connectsWithToken)
+      void showThisPage();
+  }, [status]);
 
   useEffect(() => {
     const runAsync = async () => {
@@ -91,10 +109,10 @@ const ConnectApp: React.FC = () => {
       }
       // The background only records the relay URL; the WS to the relay opens
       // once the user clicks Allow.
-      await chrome.runtime.sendMessage({ type: 'connectionRequested', mcpRelayUrl: relayUrl });
+      const token = params.get('token');
+      await chrome.runtime.sendMessage({ type: 'connectionRequested', mcpRelayUrl: relayUrl, withToken: !!token });
 
       const expectedToken = getOrCreateAuthToken();
-      const token = params.get('token');
       // With the token bypass, this page becomes the connected tab; do not expose the token in its URL.
       if (token) {
         const url = new URL(window.location.href);

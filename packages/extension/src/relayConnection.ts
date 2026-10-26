@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import { handBackFromPopup, noteClientTab } from './userTab';
+
 export function debugLog(...args: unknown[]): void {
   const enabled = true;
   if (enabled) {
@@ -57,6 +59,35 @@ const CHROME_EVENT_METHODS = [
 const REATTACH_DELAY_MS = 150;
 const REATTACH_VERIFY_MS = 2500;
 const REATTACH_COOLDOWN_MS = 3000;
+const WINDOW_OPEN_MATCH_MS = 2000;
+
+// When a tab in the background opens a tab, Chrome reports the active tab as
+// its opener. Attached tabs that just asked to open one (Page.windowOpen) are
+// queued here, oldest first, across all connections, and each new tab is
+// matched once: every connection sees the same chrome.tabs.onCreated.
+let windowOpens: Array<{ tabId: number, time: number }> = [];
+const matchedOpeners = new Map<number, { openerTabId: number | undefined, time: number }>();
+
+function openerOf(tab: chrome.tabs.Tab): number | undefined {
+  // A page opens its tab before navigating it; tabs created with a URL
+  // (chrome.tabs.create, the connect page) already have a pendingUrl.
+  if (tab.id === undefined || tab.pendingUrl)
+    return tab.openerTabId;
+  const now = Date.now();
+  windowOpens = windowOpens.filter(open => now - open.time < WINDOW_OPEN_MATCH_MS);
+  for (const [tabId, match] of matchedOpeners) {
+    if (now - match.time >= WINDOW_OPEN_MATCH_MS)
+      matchedOpeners.delete(tabId);
+  }
+  let match = matchedOpeners.get(tab.id);
+  if (!match) {
+    const index = windowOpens.findIndex(open => open.tabId === tab.openerTabId);
+    const open = index >= 0 ? windowOpens.splice(index, 1)[0] : windowOpens.shift();
+    match = { openerTabId: open?.tabId ?? tab.openerTabId, time: now };
+    matchedOpeners.set(tab.id, match);
+  }
+  return match.openerTabId;
+}
 
 export class RelayConnection {
   private _ws: WebSocket;
@@ -173,10 +204,14 @@ export class RelayConnection {
   // Forwards chrome.* events concerning attached tabs to the relay, then runs
   // shared detach bookkeeping.
   private _onChromeEvent(fullMethod: string, args: any[]): void {
+    if (fullMethod === 'chrome.debugger.onEvent' && args[1] === 'Page.windowOpen' && this._attachedTabs.has(args[0]?.tabId))
+      windowOpens.push({ tabId: args[0].tabId, time: Date.now() });
     const tabId = this._tabIdForEventArgs(fullMethod, args);
     if (tabId === undefined || !this._attachedTabs.has(tabId))
       return;
     this._sendMessage({ method: fullMethod, params: args });
+    if (fullMethod === 'chrome.tabs.onCreated')
+      void handBackFromPopup(args[0], tabId);
     // chrome.debugger.onDetach is the single source of truth for detach bookkeeping.
     if (fullMethod === 'chrome.debugger.onDetach') {
       const reason = args[1] as string | undefined;
@@ -241,8 +276,8 @@ export class RelayConnection {
       case 'chrome.tabs.onCreated': {
         const tab = args[0] as chrome.tabs.Tab;
         // Forward only popups opened by an attached tab; report the opener so cdpRelay
-        // can filter / decide. We use the openerTabId for the attached-tab check.
-        return tab.openerTabId;
+        // can filter / decide. We use the opener for the attached-tab check.
+        return openerOf(tab);
       }
       case 'chrome.tabs.onRemoved':
         return args[0] as number;
@@ -281,6 +316,8 @@ export class RelayConnection {
       throw new Error(`Unknown method: ${message.method}`);
     const args = (message.params ?? []) as any[];
     const result = await invokeChromeMethod(message.method, args);
+    if (message.method === 'chrome.tabs.create')
+      noteClientTab(result);
     // Attach bookkeeping; detach flows through the chrome.debugger.onDetach event.
     if (message.method === 'chrome.debugger.attach') {
       const target = args[0] as chrome.debugger.Debuggee | undefined;
