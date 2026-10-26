@@ -70,6 +70,7 @@ jobs:
         out/focus-sampler --preflight | tee out/screen-capture-permission.txt
     - name: Focus proof
       continue-on-error: true
+      timeout-minutes: 30
       run: |
         for version in before after; do
           for scenario in other-app browser-front; do
@@ -89,6 +90,7 @@ jobs:
     - name: Headed extension tests, branch
       if: matrix.browser == 'chromium'
       continue-on-error: true
+      timeout-minutes: 30
       working-directory: after
       run: |
         node utils/desk-focus-proof/watch-command.mjs --out ../out/tests-after --label "extension-tests-after-${{ runner.os }}" -- \

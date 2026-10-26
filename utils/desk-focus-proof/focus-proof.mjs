@@ -100,6 +100,8 @@ function abort(message) {
 }
 if (!personTab)
   abort('person tab never reported by the observer extension');
+// A stuck agent action must not hold the run (and the CI job) forever.
+setTimeout(() => abort(`run did not finish within ${arg('deadline', '300')} s`), +arg('deadline', '300') * 1000).unref();
 const token = await lib.readExtensionToken(browser.devtoolsPort).catch(e => abort(`could not read the Playwright extension token: ${e}`));
 if (!token)
   abort('could not read the Playwright extension token');
