@@ -26,9 +26,9 @@ import type { StartClient } from '../mcp/fixtures';
 
 async function openUserTab(browserContext: BrowserContext, server: { PREFIX: string, setContent: (path: string, content: string, mimeType: string) => void }): Promise<Page> {
   server.setContent('/user', '<title>User</title><body><input id=note></body>', 'text/html');
-  const page = await browserContext.newPage();
+  // Use the window's blank tab, which is already the active one.
+  const page = browserContext.pages().find(p => p.url() === 'about:blank') ?? await browserContext.newPage();
   await page.goto(server.PREFIX + '/user');
-  await page.bringToFront();
   return page;
 }
 
