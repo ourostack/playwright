@@ -272,12 +272,25 @@ shot('screen-3-after.png', lib.screenshotScreen);
 
 const groupsSeen = [...feed.observer].reverse().find(o => o.kind === 'state')?.groups ?? [];
 
-// After the measured run: recording is meant to show its tab, because the
-// person acts in it; and a popup window (window.open with window features)
-// opens a new browser window. Observed for information only.
+// After the measured run: a popup window (window.open with window features)
+// opens a new browser window; and recording is meant to show its tab, because
+// the person acts in it. Observed for information only, popup window first,
+// because recording leaves its tab active.
 const extras = {};
 if (agents.length === 2) {
   await lib.sleep(1500);
+  const t1 = Date.now();
+  await call(agents[1], 'browser_evaluate', { function: `() => { window.open(location.origin + '/agent?name=B&n=30', '', 'popup,width=500,height=400'); }` }, undefined, 'popup-window');
+  await lib.sleep(2500);
+  const windowFocus = feed.observer.filter(o => o.t >= t1 && o.kind === 'windowFocusChanged').map(o => ({ dt: o.t - t1, windowId: o.windowId }));
+  extras.popupWindow = {
+    from: t1,
+    browserCameForward: sampler.lines.some(l => l.t >= t1 && ((l.kind === 'activate' && l.app?.pid === browser.pid) || (l.kind === 'sample' && scenario === 'other-app' && l.front?.pid === browser.pid))),
+    windowFocusEvents: windowFocus.filter(f => f.windowId !== -1).length,
+    windowFocus,
+    personTabActive: ([...feed.observer].reverse().find(o => o.kind === 'state' || o.kind === 'tick')?.windows.find(w => w.id === personWindow)?.activeTab) === personTab,
+  };
+  await lib.sleep(1000);
   const t0 = Date.now();
   await call(agents[0], 'browser_start_recording', {}, undefined, 'recording');
   await lib.sleep(1500);
@@ -285,16 +298,6 @@ if (agents.length === 2) {
   const active = state?.windows.find(w => w.id === personWindow)?.activeTab;
   extras.recording = { from: t0, personTabActive: active === personTab };
   await call(agents[0], 'browser_stop_recording', {}, undefined, 'recording');
-  await lib.sleep(1000);
-  const t1 = Date.now();
-  await call(agents[1], 'browser_evaluate', { function: `() => { window.open(location.origin + '/agent?name=B&n=30', '', 'popup,width=500,height=400'); }` }, undefined, 'popup-window');
-  await lib.sleep(2500);
-  extras.popupWindow = {
-    from: t1,
-    browserCameForward: sampler.lines.some(l => l.t >= t1 && ((l.kind === 'activate' && l.app?.pid === browser.pid) || (l.kind === 'sample' && scenario === 'other-app' && l.front?.pid === browser.pid))),
-    windowFocusEvents: feed.observer.filter(o => o.t >= t1 && o.kind === 'windowFocusChanged' && o.windowId !== -1).length,
-    personTabActive: ([...feed.observer].reverse().find(o => o.kind === 'state' || o.kind === 'tick')?.windows.find(w => w.id === personWindow)?.activeTab) === personTab,
-  };
   log('extras', JSON.stringify(extras));
 }
 for (const agent of agents) {
@@ -388,7 +391,7 @@ const checks = [
   { name: "The person's tab stayed the active tab when an agent's click opened a tab (link with target=_blank, window.open)", required: true, pass: count(tabActivations, inPopup) === 0 && count(wrongPolls, inPopup) === 0, detail: `${count(tabActivations, inPopup)} other tabs activated; ${count(wrongPolls, inPopup)} of ${count(allPolls, inPopup)} polls saw another active tab; person's tab not active for ${popupSpans.map(s => s.ms + ' ms').join(', ') || '0 ms'}` },
   { name: 'Every agent action succeeded', required: true, pass: failedActions.length === 0 && actions.length > 0, detail: `${actions.length - failedActions.length} of ${actions.length} actions succeeded` },
   ...(extras.recording ? [{ name: 'Recording shows the recorded tab, because the person acts in it (information only, after the run)', required: false, pass: !extras.recording.personTabActive, detail: extras.recording.personTabActive ? "the person's tab stayed active" : "the recorded tab became the active tab" }] : []),
-  ...(extras.popupWindow ? [{ name: 'A popup window (window.open with window features) stays behind (information only, after the run)', required: false, pass: !extras.popupWindow.browserCameForward && extras.popupWindow.personTabActive, detail: `browser came forward: ${extras.popupWindow.browserCameForward}; window focus events: ${extras.popupWindow.windowFocusEvents}; person's tab still active in its window: ${extras.popupWindow.personTabActive}` }] : []),
+  ...(extras.popupWindow ? [{ name: 'A popup window (window.open with window features) stays behind (information only, after the run)', required: false, pass: !extras.popupWindow.browserCameForward && extras.popupWindow.personTabActive, detail: `browser came forward: ${extras.popupWindow.browserCameForward}; window focus changes: ${extras.popupWindow.windowFocus.map(f => `${f.windowId === personWindow ? "person's window" : f.windowId === -1 ? 'no window' : 'new window'} at ${f.dt} ms`).join(', ') || 'none'}; person's tab still active in its window: ${extras.popupWindow.personTabActive}` }] : []),
   { name: 'Browser never asked to focus one of its windows (information only: macOS refused the request)', required: false, pass: windowFocusEvents.length === 0, detail: `${windowFocusEvents.length} window focus events (Chrome's own; the frontmost-app checks show whether macOS honored them)` },
 ];
 const pass = checks.filter(c => c.required).every(c => c.pass);
@@ -408,6 +411,7 @@ const result = {
   screenshots: screens,
   agentScreenshots: agents.flatMap(a => fs.readdirSync(a.agentDir).filter(f => f.endsWith('.png')).map(f => path.join(path.basename(a.agentDir), f))),
   tempDir: tmp,
+  extras,
 };
 function median(xs) { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : null; }
 
