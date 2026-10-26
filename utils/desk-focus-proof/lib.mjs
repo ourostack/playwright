@@ -321,7 +321,13 @@ export async function launchTestBrowser({ executable, userDataDir, extensions, s
   const app = appBundleOf(executable);
   const portFile = path.join(userDataDir, 'DevToolsActivePort');
   let launchedDirectly = false;
-  if (isMac) {
+  // Branded Edge on GitHub's macOS runners never returns from `open`, and the
+  // instance it starts late stays in front of everything; start it directly.
+  if (isMac && /Microsoft Edge/.test(executable)) {
+    console.log('starting Edge directly, which can bring it forward at start');
+    spawn(executable, args, { detached: true, stdio: 'ignore' }).unref();
+    launchedDirectly = true;
+  } else if (isMac) {
     try {
       execFileSync('/usr/bin/open', ['-g', '-n', '-a', app, '--args', ...args], { timeout: 20000 });
     } catch (e) {
