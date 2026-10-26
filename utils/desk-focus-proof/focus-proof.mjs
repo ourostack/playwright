@@ -88,6 +88,10 @@ function abort(message) {
   console.error(message);
   console.error('observer reports:', JSON.stringify(feed.observer.slice(-3)).slice(0, 2000));
   console.error('person reports:', feed.person.length);
+  console.error('latest observer state:', JSON.stringify([...feed.observer].reverse().find(o => o.kind === 'state')));
+  fs.writeFileSync(path.join(outDir, 'raw-observer.jsonl'), feed.observer.map(l => JSON.stringify(l)).join('\n'));
+  fs.writeFileSync(path.join(outDir, 'raw-sampler.jsonl'), sampler.lines.map(l => JSON.stringify(l)).join('\n'));
+  shot('screen-abort.png', lib.screenshotScreen);
   sampler.stop();
   void lsappinfo.stop();
   lib.quitBrowser(browser.pid);
