@@ -20,7 +20,7 @@ permissions:
 
 env:
   FORCE_COLOR: 1
-  UPSTREAM_SHA: b8336b3b7207be8af5439bf5de53252edde158cf
+  UPSTREAM_SHA: c409f8c83ec04485e829809beceb722d9cf8ff38
 
 jobs:
   proof:
@@ -75,24 +75,19 @@ jobs:
         run() {
           label="$1-${{ runner.os }}-${{ matrix.browser }}-$3"
           node after/utils/desk-focus-proof/focus-proof.mjs --playwright "$2" --browser "$BROWSER_EXE" \
-            --label "$label" --scenario "$3" --rounds 2 --variant "$4" --out "out/proof/$label" 2>&1 | tee "out/proof-$label.log" || true
+            --label "$label" --scenario "$3" --rounds 2 --out "out/proof/$label" 2>&1 | tee "out/proof-$label.log" || true
         }
         for scenario in other-app browser-front; do
-          run before before $scenario ""
-          run after after $scenario ""
-          # Without the extension's tabs.onCreated hand-back, to measure what it buys.
-          run after-no-oncreated after $scenario no-oncreated
+          run before before $scenario
+          run after after $scenario
         done
-    - name: Connect page hand-back timing, with and without the tabs.onCreated listener
+    - name: Connect page hand-back timing
       continue-on-error: true
       timeout-minutes: 15
       run: |
         mkdir -p out/connect-restore
-        for variant in with-oncreated no-oncreated; do
-          v=$variant; [ "$v" = with-oncreated ] && v=""
-          node after/utils/desk-focus-proof/experiments/connect-restore.mjs after "$BROWSER_EXE" \
-            "out/connect-restore/${{ runner.os }}-${{ matrix.browser }}-$variant.json" 40 "$v" 2>&1 | tee "out/connect-restore/${{ runner.os }}-${{ matrix.browser }}-$variant.log" || true
-        done
+        node after/utils/desk-focus-proof/experiments/connect-restore.mjs after "$BROWSER_EXE" \
+          "out/connect-restore/${{ runner.os }}-${{ matrix.browser }}.json" 40 2>&1 | tee "out/connect-restore/${{ runner.os }}-${{ matrix.browser }}.log" || true
     - name: Headed extension tests, upstream main
       if: matrix.browser == 'chromium'
       continue-on-error: true
@@ -145,3 +140,60 @@ jobs:
     - run: npm run build
     - run: npx playwright install --with-deps chromium
     - run: npm run test-extension
+
+  # The new tests of each pull request, run against the code before it: with
+  # the pull request's source files taken from upstream main (and, for the
+  # extension, from the version reviewed before), the tests should fail.
+  red-before:
+    name: new tests on ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: PR 1 with upstream main's browserModel.ts
+            branch: user/arimendelow/no-focus-1-background-tabs
+            from: c409f8c83ec04485e829809beceb722d9cf8ff38
+            revert: packages/playwright-core/src/tools/mcp/browserModel.ts
+            spec: tests/extension/background-tabs.spec.ts
+          - name: PR 2 with upstream main's context.ts
+            branch: user/arimendelow/no-focus-2-no-activate
+            from: c409f8c83ec04485e829809beceb722d9cf8ff38
+            revert: packages/playwright-core/src/tools/backend/context.ts
+            spec: tests/extension/no-activate.spec.ts
+          - name: PR 3 with upstream main's extension
+            branch: user/arimendelow/no-focus-3-extension-connect
+            from: c409f8c83ec04485e829809beceb722d9cf8ff38
+            revert: packages/extension
+            spec: tests/extension/connect-in-background.spec.ts
+          - name: PR 3 with the extension reviewed before (c1b1d54c3)
+            branch: user/arimendelow/no-focus-3-extension-connect
+            from: c1b1d54c3ef91b1f1fdf73acd9128e9a0f34136d
+            revert: packages/extension
+            spec: tests/extension/connect-in-background.spec.ts
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ matrix.branch }}
+        fetch-depth: 0
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - name: Take the source files from before
+      run: |
+        git fetch --no-tags origin ${{ matrix.from }} || true
+        git checkout ${{ matrix.from }} -- ${{ matrix.revert }}
+        git status --short
+    - run: npm ci
+    - run: npm run build
+    - run: npx playwright install --with-deps chromium
+    - name: Run the new tests
+      run: |
+        mkdir -p out
+        npx playwright test --config=tests/extension/playwright.config.ts --retries=0 ${{ matrix.spec }} 2>&1 | tee out/red-before.log || true
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: red-before-${{ strategy.job-index }}
+        path: out
